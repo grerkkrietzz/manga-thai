@@ -17,16 +17,29 @@ jobs:
 
       - uses: android-actions/setup-android@v3
 
-      - name: Unzip source
-        run: unzip -o MangaThai-Mobile-source.zip
+      - name: Find and unzip source
+        run: |
+          echo "ไฟล์ใน repo:"; ls -la
+          if [ ! -f gradlew ] && [ ! -d mangathai-android ]; then
+            ZIP=$(ls *.zip 2>/dev/null | head -1)
+            if [ -z "$ZIP" ]; then
+              echo "::error::ไม่พบไฟล์ .zip ใน repo กรุณาอัปโหลด MangaThai-Mobile-source.zip"
+              exit 1
+            fi
+            echo "แตกไฟล์: $ZIP"
+            unzip -o "$ZIP"
+          fi
 
       - name: Build
-        working-directory: mangathai-android
         run: |
+          DIR=$(dirname "$(find . -name gradlew -not -path './.git/*' | head -1)")
+          echo "build ใน: $DIR"
+          cd "$DIR"
           chmod +x gradlew
           ./gradlew --no-daemon assembleDebug
+          cp app/build/outputs/apk/debug/app-debug.apk "$GITHUB_WORKSPACE/MangaThai.apk"
 
       - uses: actions/upload-artifact@v4
         with:
           name: MangaThai-APK
-          path: mangathai-android/app/build/outputs/apk/debug/app-debug.apk
+          path: MangaThai.apk
