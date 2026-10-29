@@ -2,11 +2,15 @@ name: Build APK
 
 on:
   push:
+    branches: [main]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -15,31 +19,37 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - uses: android-actions/setup-android@v3
-
-      - name: Find and unzip source
-        run: |
-          echo "ไฟล์ใน repo:"; ls -la
-          if [ ! -f gradlew ] && [ ! -d mangathai-android ]; then
-            ZIP=$(ls *.zip 2>/dev/null | head -1)
-            if [ -z "$ZIP" ]; then
-              echo "::error::ไม่พบไฟล์ .zip ใน repo กรุณาอัปโหลด MangaThai-Mobile-source.zip"
-              exit 1
-            fi
-            echo "แตกไฟล์: $ZIP"
-            unzip -o "$ZIP"
-          fi
-
       - name: Build
         run: |
-          DIR=$(dirname "$(find . -name gradlew -not -path './.git/*' | head -1)")
-          echo "build ใน: $DIR"
-          cd "$DIR"
-          chmod +x gradlew
-          ./gradlew --no-daemon assembleDebug
-          cp app/build/outputs/apk/debug/app-debug.apk "$GITHUB_WORKSPACE/MangaThai.apk"
+          set -o pipefail
+          {
+            echo "== files"; ls -la
+            echo "ANDROID_HOME=$ANDROID_HOME"; java -version 2>&1
+            if [ ! -f gradlew ] && [ ! -d mangathai-android ]; then
+              ZIP=$(ls *.zip | head -1)
+              echo "unzip: $ZIP"; unzip -o "$ZIP"
+            fi
+            DIR=$(dirname "$(find . -name gradlew -not -path './.git/*' | head -1)")
+            echo "build dir: $DIR"; cd "$DIR"
+            chmod +x gradlew
+            ./gradlew --no-daemon --stacktrace assembleDebug
+            cp app/build/outputs/apk/debug/app-debug.apk "$GITHUB_WORKSPACE/MangaThai.apk"
+          } 2>&1 | tee "$RUNNER_TEMP/build-log.txt"
 
       - uses: actions/upload-artifact@v4
         with:
           name: MangaThai-APK
           path: MangaThai.apk
+
+      - name: Save log for Claude
+        if: failure()
+        run: |
+          cp "$RUNNER_TEMP/build-log.txt" /tmp/log.txt 2>/dev/null || echo "failed before build step" > /tmp/log.txt
+          git config user.name build-bot
+          git config user.email build-bot@users.noreply.github.com
+          git checkout --orphan build-log
+          git rm -rf --cached . > /dev/null
+          cp /tmp/log.txt build-log.txt
+          git add build-log.txt
+          git commit -m "build log"
+          git push -f origin build-log
