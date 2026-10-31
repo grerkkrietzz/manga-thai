@@ -83,13 +83,15 @@
   msg.append(el('b', '', 'แปล'), document.createTextNode(' '));
   const detail = el('span', 'detail', 'กำลังเริ่ม…');
   msg.appendChild(detail);
+  const sizeButton = el('button', 'size', 'ขนาด');
   const toggleButton = el('button', 'toggle', 'ซ่อน');
   const stopButton = el('button', 'stop', 'หยุด');
   const closeButton = el('button', 'close', '✕');
-  pill.append(msg, toggleButton, stopButton, closeButton);
+  pill.append(msg, sizeButton, toggleButton, stopButton, closeButton);
   root.append(pages, pill);
   (document.documentElement || document.body).appendChild(host);
   toggleButton.addEventListener('click', toggle);
+  sizeButton.addEventListener('click', nextSize);
   stopButton.addEventListener('click', stop);
   closeButton.addEventListener('click', destroy);
 
@@ -115,6 +117,24 @@
     delete window.__mangathai;
   }
 
+  // Reader's text size: 100% fills each balloon as far as it fits; other steps
+  // make the text smaller or larger (larger still never leaves the balloon).
+  const SIZES = [1, 1.25, 1.5, 0.8];
+  function fontScale() {
+    try { return Number(MangaThaiNative.fontScale()) || 1; } catch (_) { return 1; }
+  }
+  let userScale = fontScale();
+  function nextSize() {
+    const i = SIZES.findIndex(v => Math.abs(v - userScale) < 0.01);
+    userScale = SIZES[(i + 1) % SIZES.length];
+    try { MangaThaiNative.setFontScale(userScale); } catch (_) { }
+    refit();
+    detail.textContent = 'ขนาดตัวอักษร ' + Math.round(userScale * 100) + '%';
+  }
+  function refit() {
+    for (const entry of state.entries.values()) entry.scale = 0;
+  }
+
   /** Forget results (after rules change or cache clear) and translate again. */
   function reset() {
     for (const entry of state.entries.values()) entry.layer.remove();
@@ -123,7 +143,7 @@
     state.prefetch = { total: 0, done: 0 };
     scan();
   }
-  window.__mangathai = { toggle, reset };
+  window.__mangathai = { toggle, reset, refit };
 
   function report() {
     let done = 0, failed = 0, total = 0, waitingCount = 0;
@@ -264,17 +284,24 @@
   function fit(entry, scale) {
     for (const text of entry.layer.querySelectorAll('.text')) {
       const span = text.firstChild;
-      // Start a little larger than the English letters, shrink until it fits.
-      let size = Math.max(7, Math.min(40, Number(text.dataset.font) * scale * 1.05));
-      text.style.fontSize = size + 'px';
-      let guard = 60;
-      // The span spans the full width and wraps anywhere, so only height can overflow;
-      // compare its real height (not scroll size) with the box.
-      while (guard-- > 0 && size > 6 &&
-             (span.getBoundingClientRect().height > text.clientHeight + 1 || span.scrollWidth > text.clientWidth + 1)) {
-        size -= size > 14 ? 1 : 0.5;
+      const overflows = size => {
         text.style.fontSize = size + 'px';
+        // The span spans the full width and wraps, so compare its real height
+        // (not scroll size) with the box, plus any word too wide for a line.
+        return span.getBoundingClientRect().height > text.clientHeight + 1 || span.scrollWidth > text.clientWidth + 1;
+      };
+      // Thai letters look smaller than English capitals at the same size, so aim
+      // above the English letter height, then take the largest size that fits.
+      const english = Number(text.dataset.font) * scale;
+      // Capped so a short word in a big balloon does not turn into a headline.
+      let high = Math.min(64, Math.max(10, english * 2.4)) * userScale;
+      let low = 5;
+      if (!overflows(high)) { continue; }
+      for (let step = 0; step < 9 && high - low > 0.5; step++) {
+        const mid = (low + high) / 2;
+        if (overflows(mid)) high = mid; else low = mid;
       }
+      text.style.fontSize = low + 'px';
     }
   }
 

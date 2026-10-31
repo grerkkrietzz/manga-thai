@@ -40,8 +40,10 @@ import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
@@ -49,7 +51,7 @@ import java.util.concurrent.TimeUnit;
 public final class Engine {
     public interface Status { void show(String text); }
 
-    private static final String CACHE_VERSION = "m3";
+    private static final String CACHE_VERSION = "m4";
 
     public static final String MODE_BASIC = "basic";
     public static final String MODE_DETECTOR = "detector";
@@ -285,25 +287,27 @@ public final class Engine {
             blockIndex++;
         }
 
+        Map<List<Grouper.Line>, float[]> regions = new IdentityHashMap<>();
         List<List<Grouper.Line>> groups = MODE_DETECTOR.equals(mode) && detector != null
-                ? detectedGroups(bitmap, lines) : Grouper.group(lines);
+                ? detectedGroups(bitmap, lines, regions) : Grouper.group(lines);
         JSONArray bubbles = new JSONArray();
         int index = 0;
         for (List<Grouper.Line> group : groups) {
             index++;
-            String source = TextTools.clean(fixer.fix(bestReading(bitmap, group)));
+            float[] region = regions.get(group);
+            String source = TextTools.clean(fixer.fix(bestReading(bitmap, group, region)));
             if (!TextTools.worthTranslating(source)) continue;
             status.show("แปลช่อง " + index + "/" + groups.size());
             String thai = translate(source);
             if (thai.trim().isEmpty()) continue;
-            float[] rect = Grouper.bounds(group);
+            float[] rect = region == null ? realBounds(group) : union(realBounds(group), region);
             String[] colors = colors(bitmap, rect);
             JSONObject item = new JSONObject();
             item.put("cover", array(rect));
-            item.put("box", array(textBox(rect, width, height)));
+            item.put("box", array(room(bitmap, rect)));
             item.put("thai", thai);
             item.put("source", source);
-            item.put("font", Math.round(Grouper.medianHeight(group) * 0.9f));
+            item.put("font", Math.round(letterHeight(group, region) * 0.9f));
             item.put("background", colors[0]);
             item.put("color", colors[1]);
             bubbles.put(item);
@@ -323,7 +327,8 @@ public final class Engine {
      * line goes to the detected block it sits in. Lines outside all blocks
      * still go through the normal grouping, so nothing the old way found is lost.
      */
-    private List<List<Grouper.Line>> detectedGroups(Bitmap bitmap, List<Grouper.Line> lines) {
+    private List<List<Grouper.Line>> detectedGroups(Bitmap bitmap, List<Grouper.Line> lines,
+                                                     Map<List<Grouper.Line>, float[]> regions) {
         List<float[]> boxes;
         try {
             boxes = detector.detect(bitmap);
@@ -352,10 +357,11 @@ public final class Engine {
             List<Grouper.Line> bucket = buckets.get(i);
             if (bucket.isEmpty()) {
                 // The detector sees text ML Kit missed: read this block from a close crop instead.
-                float[] b = boxes.get(i);
-                float w = b[2] - b[0], h = b[3] - b[1];
-                bucket.add(new Grouper.Line(b[0], b[1], w, h, "", -1 - i));
+                float[] e = boxes.get(i);
+                bucket.add(new Grouper.Line(e[0], e[1], e[2] - e[0], e[3] - e[1], "", -1 - i));
             }
+            float[] b = boxes.get(i);
+            regions.put(bucket, new float[]{b[0], b[1], b[2] - b[0], b[3] - b[1]});
             groups.add(bucket);
         }
         groups.addAll(Grouper.group(leftover));
@@ -393,7 +399,7 @@ public final class Engine {
             float em = (float) Math.sqrt(rect[2] * rect[3] / (Math.max(4, thai.length()) * 0.8f));
             JSONObject bubble = new JSONObject();
             bubble.put("cover", array(rect));
-            bubble.put("box", array(textBox(rect, width, height)));
+            bubble.put("box", array(room(bitmap, rect)));
             bubble.put("thai", thai);
             bubble.put("source", item.source);
             bubble.put("font", Math.round(Math.max(8f, Math.min(em, rect[3] * 0.6f))));
@@ -480,11 +486,11 @@ public final class Engine {
      * boosted contrast, inverted for light-on-dark text) and keeps whichever
      * reading has the most real English words.
      */
-    private String bestReading(Bitmap bitmap, List<Grouper.Line> group) {
+    private String bestReading(Bitmap bitmap, List<Grouper.Line> group, float[] region) {
         String best = Grouper.joinText(group);
-        float bestScore = fixer.score(best);
-        float h = Grouper.medianHeight(group);
-        float[] r = Grouper.bounds(group);
+        float bestScore = best.isEmpty() ? -Float.MAX_VALUE : fixer.score(best);
+        float h = letterHeight(group, region);
+        float[] r = region == null ? Grouper.bounds(group) : union(realBounds(group), region);
         float pad = Math.max(6f, h * 0.6f);
         int x0 = clamp((int) (r[0] - pad), 0, bitmap.getWidth() - 1);
         int y0 = clamp((int) (r[1] - pad), 0, bitmap.getHeight() - 1);
@@ -610,12 +616,43 @@ public final class Engine {
         try { write(textCacheFile, textCache.toString()); textCacheDirty = false; } catch (IOException ignored) { }
     }
 
-    /** Thai is longer than English: give it a little more room around the English text. */
-    private static float[] textBox(float[] r, int width, int height) {
-        float growX = r[2] * 0.12f, growY = r[3] * 0.10f;
-        float left = Math.max(0, r[0] - growX), top = Math.max(0, r[1] - growY);
-        float right = Math.min(width, r[0] + r[2] + growX), bottom = Math.min(height, r[1] + r[3] + growY);
-        return new float[]{left, top, right - left, bottom - top};
+    /**
+     * Room for the Thai text: the lettering plus the empty balloon / caption
+     * paper around it, stopping at the balloon's border so nothing spills out.
+     */
+    private static float[] room(Bitmap bitmap, float[] r) {
+        int width = bitmap.getWidth(), height = bitmap.getHeight();
+        float reachX = r[2] * 0.9f + 8, reachY = r[3] * 0.9f + 8;
+        int x0 = clamp((int) (r[0] - reachX), 0, width - 1), y0 = clamp((int) (r[1] - reachY), 0, height - 1);
+        int x1 = clamp((int) Math.ceil(r[0] + r[2] + reachX), x0 + 1, width);
+        int y1 = clamp((int) Math.ceil(r[1] + r[3] + reachY), y0 + 1, height);
+        int w = x1 - x0, h = y1 - y0;
+        int[] pixels = new int[w * h];
+        bitmap.getPixels(pixels, 0, w, x0, y0, w, h);
+        float[] local = {r[0] - x0, r[1] - y0, r[2], r[3]};
+        float[] found = BalloonFit.room(pixels, w, h, local, BalloonFit.paper(pixels, w, h, local));
+        return new float[]{found[0] + x0, found[1] + y0, found[2], found[3]};
+    }
+
+    /** Bounds of the lines that really came from OCR (not placeholders for a detected block). */
+    private static float[] realBounds(List<Grouper.Line> group) {
+        List<Grouper.Line> real = new ArrayList<>();
+        for (Grouper.Line line : group) if (!line.text.isEmpty()) real.add(line);
+        return Grouper.bounds(real.isEmpty() ? group : real);
+    }
+
+    /** Typical letter height; for a detected block with no OCR lines, guess from its size. */
+    private static float letterHeight(List<Grouper.Line> group, float[] region) {
+        boolean real = false;
+        for (Grouper.Line line : group) if (!line.text.isEmpty()) { real = true; break; }
+        if (real || region == null) return Grouper.medianHeight(group);
+        return Math.max(8f, Math.min(region[3] / 4.5f, region[2] / 3f));
+    }
+
+    private static float[] union(float[] a, float[] b) {
+        float x0 = Math.min(a[0], b[0]), y0 = Math.min(a[1], b[1]);
+        float x1 = Math.max(a[0] + a[2], b[0] + b[2]), y1 = Math.max(a[1] + a[3], b[1] + b[3]);
+        return new float[]{x0, y0, x1 - x0, y1 - y0};
     }
 
     /** Paper colour behind the lettering and a readable text colour. */

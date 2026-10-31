@@ -1,5 +1,6 @@
 package com.mangathai.mobile;
 
+import android.content.SharedPreferences;
 import android.util.Base64;
 import android.webkit.JavascriptInterface;
 
@@ -51,9 +52,12 @@ public final class Bridge {
     private final Thread worker;
     private volatile boolean running = true;
 
-    public Bridge(Engine engine, Output output) {
+    private final SharedPreferences prefs;
+
+    public Bridge(Engine engine, Output output, SharedPreferences prefs) {
         this.engine = engine;
         this.output = output;
+        this.prefs = prefs;
         worker = new Thread(this::loop, "mangathai-worker");
         worker.setDaemon(true);
         worker.start();
@@ -78,6 +82,17 @@ public final class Bridge {
             return;
         }
         queue.add(new Job(requestId, null, url, referer, clamp(priority), counter.incrementAndGet()));
+    }
+
+    /** Reader's text size for the translation (1 = fill the balloon). */
+    @JavascriptInterface
+    public float fontScale() {
+        return prefs.getFloat("fontScale", 1f);
+    }
+
+    @JavascriptInterface
+    public void setFontScale(float value) {
+        prefs.edit().putFloat("fontScale", Math.max(0.5f, Math.min(2f, value))).apply();
     }
 
     @JavascriptInterface

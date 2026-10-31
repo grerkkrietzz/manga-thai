@@ -149,7 +149,7 @@ public final class MainActivity extends Activity {
                 runOnUiThread(() -> web.evaluateJavascript("window.__mtStatus&&window.__mtStatus("
                         + JSONObject.quote(text) + ")", null));
             }
-        });
+        }, prefs);
         web.addJavascriptInterface(bridge, "MangaThaiNative");
         web.setWebChromeClient(new WebChromeClient() {
             @Override
