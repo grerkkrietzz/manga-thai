@@ -10,8 +10,8 @@ android {
         applicationId 'com.mangathai.mobile'
         minSdk 24
         targetSdk 35
-        versionCode 6
-        versionName '1.5'
+        versionCode 7
+        versionName '1.6'
     }
 
     // Fixed key so every build (GitHub or Android Studio) can update the
@@ -48,4 +48,6 @@ dependencies {
     implementation 'com.google.mlkit:translate:17.0.3'
     // Runs the manga text detector (ONNX) on the phone
     implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.19.2'
+
+    testImplementation 'junit:junit:4.13.2'
 }

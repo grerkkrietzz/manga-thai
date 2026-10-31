@@ -61,6 +61,7 @@ public final class MainActivity extends Activity {
         overlayScript = asset("overlay.js");
         engine = new Engine(this);
         engine.setOnline(prefs.getBoolean("online", false));
+        engine.setJoinSentences(prefs.getBoolean("joinSentences", true));
         engine.setGemini(prefs.getString("geminiKey", ""), prefs.getString("geminiModel", GeminiClient.DEFAULT_MODEL));
         String savedMode = prefs.getString("mode", Engine.MODE_BASIC);
         // Gemini without a key cannot work: start in the normal mode instead.
@@ -255,6 +256,9 @@ public final class MainActivity extends Activity {
         popup.getMenu().add(0, 5, 4, "โหลดหน้านี้ใหม่");
         popup.getMenu().add(0, 7, 5, "โหมดอ่านข้อความ: " + modeName(engine.getMode()) + "…");
         popup.getMenu().add(0, 8, 6, "ตั้งค่า Gemini (API key)…");
+        popup.getMenu().add(0, 9, 8, engine.isJoinSentences()
+                ? "✓ ต่อประโยคข้ามบอลลูน — แตะเพื่อปิด"
+                : "ต่อประโยคข้ามบอลลูน — แตะเพื่อเปิด");
         popup.getMenu().add(0, 6, 7, engine.isOnline()
                 ? "✓ แปลคุณภาพสูง (ออนไลน์) — แตะเพื่อปิด"
                 : "แปลคุณภาพสูง (ออนไลน์) — แตะเพื่อเปิด");
@@ -268,6 +272,15 @@ public final class MainActivity extends Activity {
                 case 3: confirmClear(); return true;
                 case 7: chooseMode(); return true;
                 case 8: editGemini(null); return true;
+                case 9: {
+                    boolean on = !engine.isJoinSentences();
+                    engine.setJoinSentences(on);
+                    prefs.edit().putBoolean("joinSentences", on).apply();
+                    toast(on ? "เปิดแล้ว ประโยคที่ยาวต่อไปบอลลูนข้างล่างจะแปลรวมกัน"
+                             : "ปิดแล้ว แปลทีละบอลลูน");
+                    web.evaluateJavascript("window.__mangathai&&window.__mangathai.reset()", null);
+                    return true;
+                }
                 case 4: open(HOME); return true;
                 case 5: web.reload(); return true;
                 case 6: {

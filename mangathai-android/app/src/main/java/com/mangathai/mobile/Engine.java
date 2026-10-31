@@ -51,7 +51,7 @@ import java.util.concurrent.TimeUnit;
 public final class Engine {
     public interface Status { void show(String text); }
 
-    private static final String CACHE_VERSION = "m4";
+    private static final String CACHE_VERSION = "m5";
 
     public static final String MODE_BASIC = "basic";
     public static final String MODE_DETECTOR = "detector";
@@ -70,6 +70,8 @@ public final class Engine {
     private final JSONObject textCache;
     private TextTools.Rules rules;
     private final WordFixer fixer;
+    private final Set<String> words;
+    private volatile boolean joinSentences = true;
     private volatile boolean modelReady;
     private volatile boolean online;
     private volatile String mode = MODE_BASIC;
@@ -100,7 +102,8 @@ public final class Engine {
         try { cache = new JSONObject(read(textCacheFile)); } catch (Exception e) { cache = new JSONObject(); }
         textCache = cache;
         rules = TextTools.Rules.parse(readRules());
-        fixer = new WordFixer(loadWords(context));
+        words = loadWords(context);
+        fixer = new WordFixer(words);
     }
 
     private static Set<String> loadWords(Context context) {
@@ -125,6 +128,10 @@ public final class Engine {
         geminiModel = model == null || model.trim().isEmpty() ? GeminiClient.DEFAULT_MODEL : model.trim();
     }
     public boolean hasGeminiKey() { return !geminiKey.isEmpty(); }
+
+    /** Translate a sentence that runs over several balloons as one sentence. */
+    public void setJoinSentences(boolean value) { joinSentences = value; }
+    public boolean isJoinSentences() { return joinSentences; }
 
     // ---------- rules ----------
     public synchronized String readRules() {
@@ -225,7 +232,8 @@ public final class Engine {
         String key = sha256(data);
         String current = mode;
         String suffix = MODE_GEMINI.equals(current) ? "-gm"
-                : (MODE_DETECTOR.equals(current) && detector != null ? "-d" : "") + (online ? "-g" : "");
+                : (MODE_DETECTOR.equals(current) && detector != null ? "-d" : "") + (online ? "-g" : "")
+                  + (joinSentences ? "" : "-n");
         File cached = new File(pageDir, key + suffix + ".json");
         if (cached.exists()) {
             try {
@@ -290,24 +298,84 @@ public final class Engine {
         Map<List<Grouper.Line>, float[]> regions = new IdentityHashMap<>();
         List<List<Grouper.Line>> groups = MODE_DETECTOR.equals(mode) && detector != null
                 ? detectedGroups(bitmap, lines, regions) : Grouper.group(lines);
-        JSONArray bubbles = new JSONArray();
+        // 1) Read every balloon first, so sentences can be followed across balloons.
+        List<List<Grouper.Line>> kept = new ArrayList<>();
+        List<String> sources = new ArrayList<>();
+        List<TextTools.Prepared> prepared = new ArrayList<>();
+        List<float[]> rects = new ArrayList<>();
+        List<Continuation.Box> boxes = new ArrayList<>();
         int index = 0;
         for (List<Grouper.Line> group : groups) {
             index++;
+            status.show("อ่านช่อง " + index + "/" + groups.size());
             float[] region = regions.get(group);
             String source = TextTools.clean(fixer.fix(bestReading(bitmap, group, region)));
             if (!TextTools.worthTranslating(source)) continue;
-            status.show("แปลช่อง " + index + "/" + groups.size());
-            String thai = translate(source);
-            if (thai.trim().isEmpty()) continue;
+            TextTools.Prepared p = TextTools.prepare(source, words::contains);
+            if (!TextTools.worthTranslating(p.text)) continue;
             float[] rect = region == null ? realBounds(group) : union(realBounds(group), region);
+            kept.add(group);
+            sources.add(source);
+            prepared.add(p);
+            rects.add(rect);
+            boxes.add(new Continuation.Box(rect[0], rect[1], rect[2], rect[3], letterHeight(group, region), p.continues));
+        }
+
+        // 2) Translate: one balloon at a time, or a whole sentence shared over its balloons.
+        String[] thai = new String[kept.size()];
+        List<List<Integer>> chains;
+        if (joinSentences) {
+            chains = Continuation.chains(boxes);
+        } else {
+            chains = new ArrayList<>();
+            for (int i = 0; i < kept.size(); i++) { List<Integer> one = new ArrayList<>(); one.add(i); chains.add(one); }
+        }
+        int done = 0;
+        for (List<Integer> chain : chains) {
+            done += chain.size();
+            status.show("แปลช่อง " + done + "/" + kept.size());
+            if (chain.size() > 1) {
+                StringBuilder sentence = new StringBuilder();
+                int[] weights = new int[chain.size()];
+                for (int k = 0; k < chain.size(); k++) {
+                    String part = prepared.get(chain.get(k)).text;
+                    if (k > 0) {
+                        sentence.append(' ');
+                        // The joined part continues the sentence: no capital in the middle of it.
+                        if (!part.startsWith("I ") && !part.startsWith("I'") && !part.equals("I")) {
+                            part = Character.toLowerCase(part.charAt(0)) + part.substring(1);
+                        }
+                    }
+                    sentence.append(part);
+                    weights[k] = part.length();
+                }
+                String[] pieces = Continuation.split(translate(sentence.toString()), weights);
+                if (pieces != null) {
+                    for (int k = 0; k < chain.size(); k++) {
+                        TextTools.Prepared p = prepared.get(chain.get(k));
+                        boolean last = k == chain.size() - 1;
+                        // Earlier pieces keep their "..." so the reader sees the sentence go on.
+                        thai[chain.get(k)] = last ? p.wrap(pieces[k]) : p.prefix + pieces[k] + "...";
+                    }
+                    continue;
+                }
+            }
+            for (int i : chain) thai[i] = prepared.get(i).wrap(translate(prepared.get(i).text));
+        }
+
+        // 3) Lay the Thai out over each balloon.
+        JSONArray bubbles = new JSONArray();
+        for (int i = 0; i < kept.size(); i++) {
+            if (thai[i] == null || thai[i].trim().isEmpty()) continue;
+            List<Grouper.Line> group = kept.get(i);
+            float[] rect = rects.get(i);
             String[] colors = colors(bitmap, rect);
             JSONObject item = new JSONObject();
             item.put("cover", array(rect));
             item.put("box", array(room(bitmap, rect)));
-            item.put("thai", thai);
-            item.put("source", source);
-            item.put("font", Math.round(letterHeight(group, region) * 0.9f));
+            item.put("thai", thai[i]);
+            item.put("source", sources.get(i));
+            item.put("font", Math.round(letterHeight(group, regions.get(group)) * 0.9f));
             item.put("background", colors[0]);
             item.put("color", colors[1]);
             bubbles.put(item);
