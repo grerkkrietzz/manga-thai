@@ -1,0 +1,51 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.mangathai.mobile'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'com.mangathai.mobile'
+        minSdk 24
+        targetSdk 35
+        versionCode 5
+        versionName '1.4'
+    }
+
+    // Fixed key so every build (GitHub or Android Studio) can update the
+    // installed app instead of requiring an uninstall.
+    signingConfigs {
+        shared {
+            storeFile file('mangathai.keystore')
+            storePassword 'mangathai'
+            keyAlias 'mangathai'
+            keyPassword 'mangathai'
+        }
+    }
+
+    buildTypes {
+        debug {
+            signingConfig signingConfigs.shared
+        }
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.shared
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    // On-device OCR for Latin script (model bundled in the APK, works offline)
+    implementation 'com.google.mlkit:text-recognition:16.0.1'
+    // On-device English -> Thai translation (model ~30 MB, downloaded once)
+    implementation 'com.google.mlkit:translate:17.0.3'
+    // Runs the manga text detector (ONNX) on the phone
+    implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.19.2'
+}
